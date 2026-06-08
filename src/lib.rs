@@ -5,6 +5,9 @@ Compose rules to validate that an LLM response meets requirements before
 passing it downstream. Rules include length limits, regex patterns, allowed
 value lists, JSON validity, and simple PII checks.
 
+All rules run on every call (there is no short-circuit), so a single
+[`Validator::validate`] returns *all* violations, not just the first one.
+
 ```rust
 use llm_output_validator::{Validator, Rule};
 
@@ -13,9 +16,16 @@ let v = Validator::new(vec![
     Rule::MaxLength(100),
     Rule::ValidJson,
 ]);
+
+// A valid response satisfies every rule.
 let r = v.validate("{\"ok\": true}");
 assert!(r.ok);
 assert!(r.violations.is_empty());
+
+// An invalid response collects every violation.
+let r = v.validate("no");
+assert!(!r.ok);
+assert_eq!(r.violations.len(), 2); // too short, and not valid JSON
 ```
 */
 
@@ -62,42 +72,49 @@ impl Rule {
         match self {
             Rule::MinLength(n) => {
                 if text.chars().count() < *n {
-                    Some(format!("MinLength: expected >= {} chars, got {}", n, text.chars().count()))
+                    Some(format!(
+                        "MinLength: expected >= {} chars, got {}",
+                        n,
+                        text.chars().count()
+                    ))
                 } else {
                     None
                 }
             }
             Rule::MaxLength(n) => {
                 if text.chars().count() > *n {
-                    Some(format!("MaxLength: expected <= {} chars, got {}", n, text.chars().count()))
+                    Some(format!(
+                        "MaxLength: expected <= {} chars, got {}",
+                        n,
+                        text.chars().count()
+                    ))
                 } else {
                     None
                 }
             }
-            Rule::Regex(pattern) => {
-                match Regex::new(pattern) {
-                    Ok(re) => {
-                        if !re.is_match(text) {
-                            Some(format!("Regex: text does not match /{}/", pattern))
-                        } else {
-                            None
-                        }
+            Rule::Regex(pattern) => match Regex::new(pattern) {
+                Ok(re) => {
+                    if !re.is_match(text) {
+                        Some(format!("Regex: text does not match /{}/", pattern))
+                    } else {
+                        None
                     }
-                    Err(e) => Some(format!("Regex: invalid pattern: {}", e)),
                 }
-            }
-            Rule::NotRegex(pattern) => {
-                match Regex::new(pattern) {
-                    Ok(re) => {
-                        if re.is_match(text) {
-                            Some(format!("NotRegex: text matches forbidden pattern /{}/", pattern))
-                        } else {
-                            None
-                        }
+                Err(e) => Some(format!("Regex: invalid pattern: {}", e)),
+            },
+            Rule::NotRegex(pattern) => match Regex::new(pattern) {
+                Ok(re) => {
+                    if re.is_match(text) {
+                        Some(format!(
+                            "NotRegex: text matches forbidden pattern /{}/",
+                            pattern
+                        ))
+                    } else {
+                        None
                     }
-                    Err(e) => Some(format!("NotRegex: invalid pattern: {}", e)),
                 }
-            }
+                Err(e) => Some(format!("NotRegex: invalid pattern: {}", e)),
+            },
             Rule::AllowedValues(allowed) => {
                 let set: HashSet<&String> = allowed.iter().collect();
                 if !set.contains(&text.to_string()) {
@@ -174,11 +191,7 @@ impl Validator {
 
     /// Run all rules. Returns a `ValidationResult` with all violations.
     pub fn validate(&self, text: &str) -> ValidationResult {
-        let violations: Vec<String> = self
-            .rules
-            .iter()
-            .filter_map(|r| r.check(text))
-            .collect();
+        let violations: Vec<String> = self.rules.iter().filter_map(|r| r.check(text)).collect();
         ValidationResult {
             ok: violations.is_empty(),
             violations,
@@ -191,7 +204,9 @@ impl Validator {
         if result.ok {
             Ok(())
         } else {
-            Err(ValidationError { violations: result.violations })
+            Err(ValidationError {
+                violations: result.violations,
+            })
         }
     }
 }
